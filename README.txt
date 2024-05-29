@@ -166,7 +166,7 @@ prop get(mem.memory.size) size
 memory mem.set(0, 1)
 memory mem.set(1, 1)
 
-start
+label start
 memory mem.get(adr-2) a
 memory mem.get(adr-1) b
 set c a+b
