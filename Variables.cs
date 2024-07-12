@@ -91,35 +91,50 @@ namespace MSIPL
         public static Variable Label(string name, uint value) =>
             new Variable(DataType.Label, name, value, true);
 
+        public static Variable Component(string name, Component value) =>
+            new Variable(DataType.Component, name, value, false);
+
+        public static Variable Null => new Variable(DataType.Void, null, null, true);
+
         public object Get() => _value;
         public void Set(object value)
         {
             if (value == null || TypeSystem.TypeOf(value.GetType()) != _type)
             {
-                Logger.AddMessage("Invalid value at MSIPL.Variable.Set. This error is a bug, so report that TypeSystem.ConvertValue is missing somewhere or it doesn't work correctly", Logger.MessageType.Debug);
+                Logger.AddMessage("Invalid value at MSIPL.Variable.Set", Logger.MessageType.Debug);
                 return;
             }
             _value = value;
         }
         public Variable Clone() => new Variable(this);
         //WARNING: USE THIS METHOD ONLY IF YOU ARE SURE THAT YOU NEED IT
-        public void Clear() => _value = null;
+        public void Clear(bool sure = true)
+        {
+            if (sure) throw new Exception("You are not sure. Read how this class works");
+            if (_value is LogicPart p) p.RemoveUsing();
+            if (_value is Component c) c.RemoveUsing();
+            _value = null;
+        }
 
         public string Name => _name;
         public DataType Type => _type;
         public bool IsReadonly => _isReadonly;
-        public bool IsNull => _value == null || (_value is LogicPart p && p.PartParent == null);
+        public bool IsNull => _value == null || (_value is LogicPart p && p.PartParent == null) ||
+             (_value is Component c && (c.Part == null || c.Get() == null || c.Part == null || c.Part.PartParent == null));
         public override string ToString() => $"{_type} {_name} {_value} {_isReadonly}";
     }
 
+	//Represents all MSIPL data types, including system ones
     public enum DataType
     {
-        None,
+        Void, //AKA null
+        Any, //system type for methods
         Int,
         Float,
         Bool,
-        Char, //system type of IO
+        Str, //system type of IO
         Part,
-        Label
+        Component, //system type for comp
+        Label //system type for jump
     }
 }

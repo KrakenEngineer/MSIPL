@@ -1,75 +1,63 @@
 ﻿using NCalc;
-using NCalc.Domain;
 using System;
+using UnityEngine;
 
 namespace MSIPL
 {
     //Basic class for all MSIPL instructions
     public abstract class Instruction
     {
+		//Processor is called "interpreter" or "i" everyvere. Don't ask why
         protected Processor _interpreter;
 
         public abstract InstructionType Type { get; }
 
-        public abstract void Execute();
+		//Well, executes the instruction
+		//Return 1 if you want not to increment count of instructions executed in this frame
+		//Return -1 if instruction thrown an error
+		//Return 0 in other case
+        public abstract int Execute();
 
-        protected void PushParameters(Expression exp)
-        {
-            string[] pars = exp.GetParametersNames();
-            for (int i = 0; i < pars.Length; i++)
-            {
-                Variable v = _interpreter.GetPointer(pars[i]);
-                if (v.IsNull)
-                {
-                    _interpreter.ThrowError($"Parameter {v.Name} is null at {GetType().FullName}.PushParameters");
-                    return;
-                }
-                if (v.Type == DataType.Part)
-                    exp.Parameters[pars[i]] = (v.Get() as LogicPart).PartParent.InstanceID;
-                else
-                    exp.Parameters[pars[i]] = v.Get();
-            }
-        }
+		//Pushes parameters from variable storage to expression to evaluate it
+        protected void PushParameters(Expression exp) => Argument.PushParameters(exp, _interpreter);
     }
 
-    //"set" instruction
+    //"set" instruction, evaluates an expression and pushes result into a variable
     public class Set : Instruction
     {
         private readonly Variable _dest;
-        private readonly object _val;
+        private readonly Argument _arg;
 
         public override InstructionType Type => InstructionType.set;
 
-        public Set(Processor i, Variable v, object val)
+        public Set(Processor i, Variable v, Argument arg)
         {
             if (i == null)
                 throw new Exception("Interpreter is null");
             _interpreter = i;
             _dest = v;
-            _val = val;
+            _arg = arg;
         }
 
-        public override void Execute()
+        public override int Execute()
         {
-            if (_dest.Type == DataType.Part)
+            if (_dest.Type == DataType.Part || _dest.Type == DataType.Component)
             {
-                _dest.Set((_val as Variable).Get());
-                return;
+                _dest.Set(_arg.GetValue());
+                return 0;
             }
-            PushParameters(_val as Expression);
-            object val = TypeSystem.ConvertValue((_val as Expression).Evaluate(), _dest.Type);
+            object val = _arg.GetValue(_interpreter);
             _dest.Set(val);
+            return 0;
         }
     }
 
-    //"var" instruction
+    //"var" instruction, creates a variable and initializes it with result of some expression
     public class Var : Set
     {
-        private bool _done = false;
-
         public override InstructionType Type => InstructionType.var;
 
-        public Var(Processor i, Variable v, object val) : base(i, v, val)
+        public Var(Processor i, Variable v, Argument val) : base(i, v, val)
         {
             if (!i.Variables.TryAdd(v))
             {
@@ -78,15 +66,13 @@ namespace MSIPL
             }
         }
 
-        public override void Execute()
+        public override int Execute()
         {
-            if (_done) return;
-            base.Execute();
-            _done = true;
+            return base.Execute();
         }
     }
 
-    //"jump" instruction
+    //"jump" instruction, jumps to a label if condition is true. Throws an error if condition doesn't return bool
     public class Jump : Instruction
     {
         private readonly uint _line;
@@ -103,49 +89,38 @@ namespace MSIPL
             _exp = exp;
         }
 
-        public override void Execute()
+        public override int Execute()
         {
-            PushParameters(_exp);
-            object cond = _exp.Evaluate();
-            if (!(cond is bool))
+			PushParameters(_exp);
+			object cond = _exp.Evaluate();
+			if (cond is not bool)
             {
                 _interpreter.ThrowError($"Invalid condition at MSIPL.Jump.Execute, line number is {_interpreter.CurrentLine}");
                 _interpreter.enabled = false;
-                return;
+                return -1;
             }
             if ((bool)cond)
-            {
                 _interpreter.Jump(_line);
-                _interpreter.ExecuteCurrentLine();
-            }
+            return 0;
         }
     }
 
-    //"stop" instruction
-    public class Stop : Instruction
-    {
-        public Stop(Processor i)
-        {
-            if (i == null)
-                throw new Exception("Interpreter is null");
-            _interpreter = i;
-        }
+	//"label" instruction, just exists
+	public class Label : Instruction
+	{
+		public override InstructionType Type => InstructionType.label;
 
-        public override InstructionType Type => InstructionType.stop;
+		public override int Execute() => 1;
+	}
 
-        public override void Execute()
-        {
-            _interpreter.enabled = false;
-        }
-    }
-
-    //all "time" instructions
+    //"time" instruction, advanced one
+	//Allows to know time since launch in seconds/frames, time between this and previous frame and wait for some frames
     public class Time : Instruction
     {
-        private object _arg;
-        private InstructionType _tType;
+        private readonly Argument _arg;
+        private readonly InstructionType _tType;
 
-        public Time(Processor i, InstructionType t, object arg)
+        public Time(Processor i, InstructionType t, Argument arg)
         {
             if (i == null)
                 throw new Exception("Interpreter is null");
@@ -164,32 +139,36 @@ namespace MSIPL
 
         public override MSIPL.InstructionType Type => MSIPL.InstructionType.time;
 
-        public override void Execute()
+        public override int Execute()
         {
             switch (_tType)
             {
                 case InstructionType.frames_since_launch:
-                    ((Variable)_arg).Set(TypeSystem.ConvertValue(_interpreter.FramesSinceLaunch, ((Variable)_arg).Type));
+                    ((Variable)_arg.GetValue()).Set(_interpreter.FramesSinceLaunch);
                     break;
 
                 case InstructionType.seconds_since_launch:
-                    ((Variable)_arg).Set(TypeSystem.ConvertValue(_interpreter.SecondsSinceLaunch, ((Variable)_arg).Type));
+                    ((Variable)_arg.GetValue()).Set(_interpreter.SecondsSinceLaunch);
                     break;
 
                 case InstructionType.delta_time:
-                    ((Variable)_arg).Set(TypeSystem.ConvertValue(UnityEngine.Time.deltaTime, ((Variable)_arg).Type));
+                    ((Variable)_arg.GetValue()).Set((double)UnityEngine.Time.deltaTime);
                     break;
 
                 case InstructionType.wait:
-                    PushParameters((Expression)_arg);
-                    long t = (long)TypeSystem.ConvertValue(((Expression)_arg).Evaluate(), DataType.Int);
-                    if (t <= 0) return;
-                    _interpreter.Wait((uint)t);
+                    object t = _arg.GetValue(_interpreter);
+					if ((t is not int i || i < 0) && (t is not long l || l < 0))
+					{
+						_interpreter.ThrowError($"Invalid delay {t} with type {t.GetType()} at MSIPL.Wait.Execute, line number is {_interpreter.CurrentLine}");
+						return -1;
+					}
+                    _interpreter.Wait((uint)(t is int ? (int)t : (int)(long)t));
                     break;
 
                 default:
                     break;
             }
+            return 0;
         }
 
         public enum InstructionType
@@ -202,13 +181,14 @@ namespace MSIPL
         }
     }
 
-    //all "console" instructions
+    //"console" instruction, advanced one
+	//Allows to read/write messages to chat (if it is implemented)
     public class Console : Instruction
     {
         private readonly InstructionType _cType;
-        private readonly object[] _args;
+        private readonly Argument[] _args;
 
-        public Console(Processor i, InstructionType t, object[] args)
+        public Console(Processor i, InstructionType t, Argument[] args)
         {
             if (i == null)
                 throw new Exception("Interpreter is null");
@@ -229,7 +209,7 @@ namespace MSIPL
 
         public override MSIPL.InstructionType Type => MSIPL.InstructionType.console;
 
-        public override void Execute()
+        public override int Execute()
         {
             switch (_cType)
             {
@@ -246,57 +226,53 @@ namespace MSIPL
                     {
                         _interpreter.ThrowError("Input stream is empty at MSIPL.Console.Execute case pop");
                         _interpreter.enabled = false;
-                        return;
+                        return -1;
                     }
-                    if ((DataType)_args[1] == DataType.Char)
+                    if ((DataType)_args[1].GetValue() == DataType.Str)
                     {
-                        ((Variable)_args[0]).Set((long)_interpreter.InputStream[0]);
+                        ((Variable)_args[0].GetValue()).Set((long)_interpreter.InputStream[0]);
                         _interpreter.CutInput(0, 1);
-                        return;
+                        return -1;
                     }
                     string val = FindNumber(_interpreter.InputStream,
-                        (DataType)_args[1] == DataType.Float, out int start, out int end);
+                        (DataType)_args[1].GetValue() == DataType.Float, out int start, out int end);
                     if (val == "")
                     {
                         _interpreter.ThrowError("Can't read a number at MSIPL.Console.Execute case pop");
                         _interpreter.enabled = false;
-                        return;
+                        return -1;
                     }
                     var d = double.Parse(val);
-                    ((Variable)_args[0]).Set(TypeSystem.ConvertValue(d, (DataType)_args[1]));
+                    ((Variable)_args[0].GetValue()).Set(TypeSystem.ConvertValue(d, (DataType)_args[1].GetValue()));
                     _interpreter.CutInput(0, end);
                     break;
 
                 case InstructionType.push:
                     for (int i = 0; i < _args.Length; i++)
                     {
-                        if (_args[i] is string)
-                            _interpreter.AddToOutput(_args[i]);
-                        else if (_args[i] is Variable)
-                            _interpreter.AddToOutput((char)(long)((Variable)_args[i]).Get());
-                        else if (_args[i] is Expression)
+                        if (_args[i].Type == ArgumentType.@string || _args[i].Type == ArgumentType.char_variable)
+                            _interpreter.AddToOutput(_args[i].GetValue());
+                        else if (_args[i].Type == ArgumentType.expression)
                         {
-                            PushParameters((Expression)_args[i]);
-                            object result = ((Expression)_args[i]).Evaluate();
-                            if (result is bool) result = (bool)result ? 1 : 0;
-                            _interpreter.AddToOutput(result);
+                            var result = (double)TypeSystem.ConvertValue(_args[i].GetValue(_interpreter), DataType.Float);
+                            _interpreter.AddToOutput(result % 1 == 0 ? (long)result : result);
                         }
                     }
                     break;
 
                 case InstructionType.clear:
-                    _interpreter.ClearStream((string)_args[0]);
+                    _interpreter.ClearStream((string)_args[0].GetValue());
                     break;
 
                 case InstructionType.can_pop:
-                    if ((DataType)_args[0] == DataType.Char)
+                    if (_args[0].Type == ArgumentType.char_variable)
                     {
-                        ((Variable)_args[1]).Set(!string.IsNullOrEmpty(_interpreter.InputStream));
+                        ((Variable)_args[1].GetValue()).Set(!string.IsNullOrEmpty(_interpreter.InputStream));
                         break;
                     }
                     val = FindNumber(_interpreter.InputStream,
-                        (DataType)_args[0] == DataType.Float, out start, out end);
-                    ((Variable)_args[1]).Set(!string.IsNullOrEmpty(val));
+                        (DataType)_args[0].GetValue() == DataType.Float, out start, out end);
+                    ((Variable)_args[1].GetValue()).Set(!string.IsNullOrEmpty(val));
                     break;
 
                 case InstructionType.filter:
@@ -305,6 +281,7 @@ namespace MSIPL
                 default:
                     break;
             }
+            return 0;
         }
 
         private string FindNumber(string ins, bool isFloat, out int start, out int end)
@@ -358,97 +335,66 @@ namespace MSIPL
         }
     }
 
-    //all "memory" instructions
-    public class Memory : Instruction
+    //"comp" instruction, advanced one
+	//Allows to control parts ant their components and get information from them with methods and properties
+	//Most dificult to implement in fact
+    public class Comp : Instruction
     {
-        private InstructionType _mType;
-        private LogicPart _mem;
-        private Expression _adr;
-        private object _val;
+        private readonly Variable _part;
+        private readonly PartMethod _method;
+        private readonly Argument[] _args;
+        private readonly Variable _returnVar;
 
-        public Memory(Processor i, InstructionType t, LogicPart mem, Expression adr, object v)
+        public Comp(Variable part, PartMethod method, Argument[] args, Variable returnVar, Processor i)
         {
-            if (i == null)
-                throw new Exception("Interpreter is null");
-            _interpreter = i;
-            if (t == InstructionType.none)
-            {
-                i.ThrowError("Invalid instruction at MSIPL.Memory constructor", Logger.MessageType.CompilationError);
-                return;
-            }
-            _mType = t;
-            if (mem == null)
-                throw new Exception("Memory cell is null");
-            _mem = mem;
-            if (adr == null)
-                throw new Exception("Address expression is null");
-            _adr = adr;
-            if (v == null && t != InstructionType.clear)
-                throw new Exception("Value/variable is null");
-            _val = v;
+			_part = part;
+            _method = method;
+			_args = args;
+            _returnVar = returnVar;
+			_interpreter = i;
         }
 
-        public override MSIPL.InstructionType Type => MSIPL.InstructionType.memory;
+        public static Comp Idle => new Comp(null, null, null, null, null);
 
-        public override void Execute()
+        public override InstructionType Type => InstructionType.comp;
+
+        public override int Execute()
         {
-            if (_mem == null || _mem.PartParent == null)
+            if (_method == null) return 1;
+            if (_part.IsNull)
             {
-                _mem = null;
-                _interpreter.ThrowError("Memory is null at MSIPL.Memory.Execute");
-                return;
+                _part.Clear(false);
+                _interpreter.ThrowError("Part is null at MSIPL.Comp.Execute");
+                return -1;
             }
-            if (!_mem.PartParent.TryGetComponent(out MemoryCell mem))
+            if (!ShipChecker.CanConnect(_interpreter.GetShip(), _part.GetShip()))
             {
-                _interpreter.ThrowError("This part is not a memory cell at MSIPL.Memory.Execute");
-                return;
+                _interpreter.ThrowError("Unable to connect to this part at MSIPL.Comp.Execute");
+                return -1;
             }
-
-            PushParameters(_adr);
-            long adr = Convert.ToInt64(_adr.Evaluate());
-            switch (_mType)
+            if (_returnVar == null)
             {
-                case InstructionType.get:
-                    mem.Get(adr, (Variable)_val);
-                    break;
-
-                case InstructionType.set:
-                    PushParameters((Expression)_val);
-                    mem.Set(adr, ((Expression)_val).Evaluate());
-                    break;
-
-                case InstructionType.get_type:
-                    mem.GetType(adr, (Variable)_val);
-                    break;
-
-                case InstructionType.clear:
-                    
-                    mem.Clear(adr);
-                    break;
-
-                default:
-                    break;
+                _method.Invoke(_part, _args, _interpreter);
+                return 0;
             }
-        }
-
-        public enum InstructionType
-        {
-            none,
-            get,
-            set,
-            clear,
-            get_type
+            object val = _method.Invoke(_part, _args, _interpreter);
+            if (val == null)
+            {
+                _interpreter.ThrowError("Part method returned null at MSIPL.Comp.Execute");
+                return -1;
+            }
+            _returnVar.Set(val);
+            return 0;
         }
     }
 
+	//Represents type of instruction as enum, useful in parsing
     public enum InstructionType
     {
         none,
         var, set,
-        jump,
-        time,
-        console,
-        memory,
-        stop
+        jump, label,
+        time, console,
+        comp
     }
 }

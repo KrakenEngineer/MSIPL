@@ -1,25 +1,35 @@
 ﻿using System.Collections.Generic;
 using System.Linq;
+using System;
 using NCalc;
 using NCalc.Domain;
 
 namespace MSIPL
 {
-    //Bunch of string utilites that are used in Parser
-    internal static class StringUtility
+    //Bunch of string utilites that are often used in Parser
+    public static class StringUtility
     {
-        public static string BeforeSep(this string s, char sep = ' ')
+        public static string BeforeSeparator(this string s, char sep = ' ')
         {
             string output = "";
-            for (int i = 0; i < s.Length; i++)
-            {
-                if (s[i] == sep)
-                    return output;
+            for (int i = 0; i < s.Length && s[i] != sep; i++)
                 output += s[i];
-            }
             return output;
         }
 
+        public static string AfterSeparator(this string s, char sep = ' ')
+        {
+            string output = "";
+            int start = 0;
+            while (start < s.Length && s[start] != sep)
+                start++;
+            start++;
+            for (int i = start; i < s.Length; i++)
+                output += s[i];
+            return output;
+        }
+
+		//Removes given amount of characters from left and right sides of string
         public static string RemoveEdges(this string s, uint left = 1, uint right = 1)
         {
             string output = "";
@@ -32,20 +42,18 @@ namespace MSIPL
     //Properties and small methods for Parser
     internal static class ParserProp
     {
-        public static bool IsComment(this string s) => string.IsNullOrEmpty(s) || s[0] == '#';
-        public static bool IsLabel(this string s) => !IsComment(s) && s.BeforeSep() == "label";
-
-        public static InstructionType GetInstruction(this string s)
+		#region string -> enum stuff
+		public static InstructionType GetInstruction(this string s)
         {
             return s switch
             {
                 "var" => InstructionType.var,
                 "set" => InstructionType.set,
                 "jump" => InstructionType.jump,
+				"label" => InstructionType.label,
                 "time" => InstructionType.time,
-                "stop" => InstructionType.stop,
                 "console" => InstructionType.console,
-                "memory" => InstructionType.memory,
+                "comp" => InstructionType.comp,
                 _ => InstructionType.none
             };
         }
@@ -75,20 +83,11 @@ namespace MSIPL
                 _ => Time.InstructionType.none
             };
         }
-        public static Memory.InstructionType GetMIType(this string s)
-        {
-            return s switch
-            {
-                "get" => Memory.InstructionType.get,
-                "set" => Memory.InstructionType.set,
-                "get_type" => Memory.InstructionType.get_type,
-                "clear" => Memory.InstructionType.clear,
-                _ => Memory.InstructionType.none
-            };
-        }
+		#endregion
 
-        public static bool IsVariableNameValid(this string name)
+		public static bool IsVariableNameValid(this string name, out string error)
         {
+            error = "";
             if (string.IsNullOrEmpty(name) || double.TryParse(name, out double d) || bool.TryParse(name, out bool b))
                 return false;
             if (name[0] == '{' && name[^1] == '}')
@@ -98,21 +97,33 @@ namespace MSIPL
                     return false;
             }
 
-            for (int i = 0; i < name.Length; i++)
-                if (!IsSymbolValid(name[i]))
+            if (name.GetInstruction() != InstructionType.none)
+            {
+                error = $"You can't just name a variable like an instruction {name}!";
+                return false;
+            }
+            if (name == "this")
+            {
+                error = "Name \"this\" is reserved at MSIPL.Parser.IsVariableNameValid";
+                return false;
+            }
+
+            for (int j = 0; j < name.Length; j++)
+                if (!IsSymbolValid(name[j]))
                     return false;
             return true;
         }
         private static bool IsSymbolValid(char s) => s == '_' || ('0' <= s && s <= '9') ||
             ('a' <= s && s <= 'z') || ('A' <= s && s <= 'Z');
-
-        public static object GetConsoleArg(this string arg, Processor i)
+        public static bool IsComment(this string s) => string.IsNullOrEmpty(s) || s[0] == '#';
+        public static bool IsLabel(this string s) => !IsComment(s) && s.BeforeSeparator() == "label";
+        public static Argument GetArgument(this string arg, Processor i)
         {
             if (arg.Contains('"'))
             {
                 if (arg.Length < 2 || !(arg[0] == '"' && arg[^1] == '"'))
                     return null;
-                return arg.RemoveEdges();
+                return Argument.String(arg.RemoveEdges());
             }
             if (arg.Contains('\''))
             {
@@ -121,16 +132,18 @@ namespace MSIPL
                 arg = arg.RemoveEdges();
                 if (!i.Variables.Exists(arg))
                     return null;
-                return i.GetPointer(arg);
+                return Argument.CharVar(i.GetPointer(arg));
             }
-            var exp = new Expression(arg);
+			if (i.Variables.Exists(arg) && !i.GetType(arg).IsValueType()) return Argument.Variable(i.GetPointer(arg));
+            var exp = new Expression(arg, ExpressionOptions.OverflowProtection);
             if (exp.HasErrors() || exp.HasUnknownParameters(i.Variables))
                 return null;
-            return exp;
+            return Argument.Expression(exp);
         }
     }
 
     //Stores function as instruction name, function name, arguments and variable for return value
+	//Use RawFunction.Parse in Parser.Parse instruction case [your new instruction] to make your instruction be advanced
     internal class RawFunction
     {
         public readonly string Instruction;
@@ -138,7 +151,7 @@ namespace MSIPL
         public readonly string[] Args;
         public readonly string ReturnVar;
 
-        public RawFunction(string instruction, string name, string[] args, string returnVar)
+        private RawFunction(string instruction, string name, string[] args, string returnVar)
         {
             Instruction = instruction;
             Name = name;
@@ -355,9 +368,9 @@ namespace MSIPL
                         continue;
                     }
                     string ln = lines[k].Split()[1];
-                    if (!ln.IsVariableNameValid() || ln[0] == '{')
+                    if (!ln.IsVariableNameValid(out string err) || ln[0] == '{')
                     {
-                        i.ThrowError("Invalid name of label at MSIPL.Parser.ParseScript", Logger.MessageType.CompilationError);
+                        i.ThrowError(err == "" ? "Invalid name of label at MSIPL.Parser.ParseScript" : err, Logger.MessageType.CompilationError);
                         continue;
                     }
                     if (!i.TryAddLabel(lc, ln))
@@ -366,14 +379,13 @@ namespace MSIPL
                         continue;
                     }
                 }
-                else lc++;
-
+                lc++;
             }
             var output = new List<Instruction>();
             lc = 0;
             for (int k = 0; k < lines.Length; k++)
             {
-                if (lines[k].IsComment() || lines[k].IsLabel())
+                if (lines[k].IsComment())
                     continue;
                 Instruction ins = ParseInstruction(lines[k], i, lc);
                 output.Add(ins);
@@ -384,10 +396,10 @@ namespace MSIPL
 
         private static Instruction ParseInstruction(string s, Processor i, uint line_num)
         {
-            if (s.IsComment() || s.IsLabel())
+            if (s.IsComment())
                 return null;
             
-            InstructionType type = s.BeforeSep().GetInstruction();
+            InstructionType type = s.BeforeSeparator().GetInstruction();
             switch (type)
             {
                 case InstructionType.var:
@@ -399,22 +411,17 @@ namespace MSIPL
                 case InstructionType.jump:
                     return ParseJump(s.Split(' ', 3), i, line_num);
 
+				case InstructionType.label:
+					return new Label();
+
                 case InstructionType.time:
                     return ParseTime(RawFunction.Parse(s, line_num, i), i, line_num);
-
-                case InstructionType.stop:
-                    if (s != "stop")
-                    {
-                        i.ThrowError($"Invalid stop at MSIPL.Parser.ParseInstruction case stop, line number is {line_num}", Logger.MessageType.CompilationError);
-                        return null;
-                    }
-                    return new Stop(i);
 
                 case InstructionType.console:
                     return ParseConsole(RawFunction.Parse(s, line_num, i), i, line_num);
 
-                case InstructionType.memory:
-                    return ParseMemory(RawFunction.Parse(s, line_num, i), i, line_num);
+                case InstructionType.comp:
+                    return ParseComp(RawFunction.Parse(s, line_num, i), i, line_num);
 
                 default:
                     i.ThrowError($"Unknown instruction {type} at MSIPL.Parser.ParseInstruction, line number is {line_num}", Logger.MessageType.CompilationError);
@@ -422,7 +429,8 @@ namespace MSIPL
             }
         }
 
-        private static Var ParseVar(string[] args, Processor i, uint line_num)
+		#region parsing methods for each instruction
+		private static Var ParseVar(string[] args, Processor i, uint line_num)
         {
             if (args.Length != 4)
             {
@@ -431,33 +439,21 @@ namespace MSIPL
             }
 
             DataType t = TypeSystem.TypeOf(args[1]);
-            bool isNameValid = args[2].IsVariableNameValid();
+            bool isNameValid = args[2].IsVariableNameValid(out string err);
             if (!isNameValid)
             {
-                i.ThrowError(ErrorGenerator.GenerateSyntax("Parser.ParseVar", line_num, "variable name"), Logger.MessageType.CompilationError);
+                i.ThrowError(ErrorGenerator.GenerateSyntax(err == "" ? "Parser.ParseVar" : err, line_num, "variable name"), Logger.MessageType.CompilationError);
                 return null;
             }
             bool isReadonly = args[2][0] == '{';
             if (isReadonly) args[2] = args[2].RemoveEdges();
-            DataType type2;
-            Variable _var = null;
-            if (t == DataType.Part)
+            if (!t.IsValueType())
             {
-                if (!i.Variables.Exists(args[^1]))
-                {
-                    i.ThrowError(ErrorGenerator.GenerateVariableDoesntExist("Parser.ParseVar <part>", line_num, args[^1]), Logger.MessageType.CompilationError);
-                    return null;
-                }
-                type2 = i.GetType(args[^1]);
-                if (type2 != DataType.Part)
-                {
-                    i.ThrowError(ErrorGenerator.GenerateDataType("Parser.ParseVar <part>", line_num, type2, args[^1]), Logger.MessageType.CompilationError);
-                    return null;
-                }
-                _var = Variable.Create<LogicPart>(args[2], null, isReadonly);
-                return new Var(i, _var, i.GetValue(args[^1]));
+                i.ThrowError($"Value type is reqired at MSIPL.Parser.ParseVar, line number is {line_num}", Logger.MessageType.CompilationError);
+                return null;
             }
-            var exp = new Expression(args[^1]);
+            Variable _var = null;
+            var exp = new Expression(args[^1], ExpressionOptions.OverflowProtection);
             if (exp.HasErrors() || exp.HasUnknownParameters(i.Variables))
             {
                 i.ThrowError(ErrorGenerator.GenerateExpression("Parser.ParseVar", line_num, args[^1]), Logger.MessageType.CompilationError);
@@ -471,7 +467,7 @@ namespace MSIPL
                 i.ThrowError(ErrorGenerator.GenerateParameter("Parser.ParseVar", line_num, args[1], "type for a variable"), Logger.MessageType.CompilationError);
                 return null;
             }
-            return new Var(i, _var, exp);
+            return new Var(i, _var, Argument.Expression(exp));
         }
 
         private static Set ParseSet(string[] args, Processor i, uint line_num)
@@ -483,7 +479,7 @@ namespace MSIPL
             }
             if (!i.Variables.Exists(args[1]))
             {
-                i.ThrowError(ErrorGenerator.GenerateVariableDoesntExist("Parser.ParseSet", line_num, args[1]), Logger.MessageType.CompilationError);
+                i.ThrowError(ErrorGenerator.GenerateVariableExistance("Parser.ParseSet", line_num, args[1], false), Logger.MessageType.CompilationError);
                 return null;
             }
             if (i.GetPointer(args[1]).IsReadonly)
@@ -492,33 +488,23 @@ namespace MSIPL
                 return null;
             }
             DataType t = i.GetType(args[1]);
-            if (t == DataType.Part)
-            {
-                if (!i.Variables.Exists(args[^1]))
-                {
-                    i.ThrowError(ErrorGenerator.GenerateVariableDoesntExist("Parser.ParseSet <part>", line_num, args[^1]), Logger.MessageType.CompilationError);
-                    return null;
-                }
-                DataType type2 = i.GetType(args[^1]);
-                if (type2 != DataType.Part)
-                {
-                    i.ThrowError(ErrorGenerator.GenerateDataType("Parser.ParseSet <part>", line_num, type2, args[^1]), Logger.MessageType.CompilationError);
-                    return null;
-                }
-                return new Set(i, i.GetPointer(args[1]), i.GetPointer(args[^1]));
-            }
-            if (t == DataType.None)
+            if (t == DataType.Void)
             {
                 i.ThrowError(ErrorGenerator.GenerateDataType("Parser.ParseSet", line_num, t, args[1]), Logger.MessageType.CompilationError);
                 return null;
             }
-            var exp = new Expression(args[^1]);
+            if (!t.IsValueType())
+            {
+                i.ThrowError($"Value type is reqired at MSIPL.Parser.ParseSet, line number is {line_num}", Logger.MessageType.CompilationError);
+                return null;
+            }
+            var exp = new Expression(args[^1], ExpressionOptions.OverflowProtection);
             if (exp.HasErrors() || exp.HasUnknownParameters(i.Variables))
             {
                 i.ThrowError(ErrorGenerator.GenerateExpression("Parser.ParseSet", line_num, args[^1]), Logger.MessageType.CompilationError);
                 return null;
             }
-            return new Set(i, i.GetPointer(args[1]), exp);
+            return new Set(i, i.GetPointer(args[1]), Argument.Expression(exp));
         }
 
         private static Jump ParseJump(string[] args, Processor i, uint line_num)
@@ -533,7 +519,7 @@ namespace MSIPL
                 i.ThrowError($"Label {args[1]} doesn't exist at MSIPL.Parser.ParseJump, line number is {line_num}", Logger.MessageType.CompilationError);
                 return null;
             }
-            var exp = new Expression(args[^1]);
+            var exp = new Expression(args[^1], ExpressionOptions.OverflowProtection);
             if (exp.HasErrors() || exp.HasUnknownParameters(i.Variables))
             {
                 i.ThrowError(ErrorGenerator.GenerateExpression("Parser.ParseJump", line_num, args[^1]), Logger.MessageType.CompilationError);
@@ -562,7 +548,7 @@ namespace MSIPL
                     }
                     if (!i.Variables.Exists(f.ReturnVar))
                     {
-                        i.ThrowError(ErrorGenerator.GenerateVariableDoesntExist($"Parser.ParseTime case {type}", line_num, f.ReturnVar), Logger.MessageType.CompilationError);
+                        i.ThrowError(ErrorGenerator.GenerateVariableExistance($"Parser.ParseTime case {type}", line_num, f.ReturnVar, false), Logger.MessageType.CompilationError);
                         return null;
                     }
                     if (i.GetPointer(f.ReturnVar).IsReadonly)
@@ -576,7 +562,7 @@ namespace MSIPL
                         i.ThrowError(ErrorGenerator.GenerateDataType($"Parser.ParseTime case {type}", line_num, t, f.ReturnVar), Logger.MessageType.CompilationError);
                         return null;
                     }
-                    return new Time(i, type, i.GetPointer(f.ReturnVar));
+                    return new Time(i, type, Argument.Variable(i.GetPointer(f.ReturnVar)));
 
                 case Time.InstructionType.wait:
                     if (f.ArgsCount != 1)
@@ -589,13 +575,13 @@ namespace MSIPL
                         i.ThrowError(ErrorGenerator.GenerateReturnVariable("Parser.ParseTime case wait", line_num, "time wait", false), Logger.MessageType.CompilationError);
                         return null;
                     }
-                    var exp = new Expression(f.Args[0]);
+                    var exp = new Expression(f.Args[0], ExpressionOptions.OverflowProtection);
                     if (exp.HasErrors() || exp.HasUnknownParameters(i.Variables))
                     {
                         i.ThrowError(ErrorGenerator.GenerateExpression("Parser.ParseTime case wait", line_num, f.Args[0]), Logger.MessageType.CompilationError);
                         return null;
                     }
-                    return new Time(i, Time.InstructionType.wait, exp);
+                    return new Time(i, Time.InstructionType.wait, Argument.Expression(exp));
 
                 default:
                     i.ThrowError(ErrorGenerator.GenerateFunctionName("Parser.ParseTime", line_num, "wait", f.Name), Logger.MessageType.CompilationError);
@@ -634,12 +620,12 @@ namespace MSIPL
                     if (ch) var_name = var_name.RemoveEdges();
                     if (!i.Variables.Exists(var_name))
                     {
-                        i.ThrowError(ErrorGenerator.GenerateVariableDoesntExist("Parser.ParseConsole case pop", line_num, var_name), Logger.MessageType.CompilationError);
+                        i.ThrowError(ErrorGenerator.GenerateVariableExistance("Parser.ParseConsole case pop", line_num, var_name, false), Logger.MessageType.CompilationError);
                         return null;
                     }
-                    if (i.GetPointer(f.ReturnVar).IsReadonly)
+                    if (i.GetPointer(var_name).IsReadonly)
                     {
-                        i.ThrowError(ErrorGenerator.GenerateReadonly("Parser.ParseConsole case pop", line_num, f.ReturnVar), Logger.MessageType.CompilationError);
+                        i.ThrowError(ErrorGenerator.GenerateReadonly("Parser.ParseConsole case pop", line_num, var_name), Logger.MessageType.CompilationError);
                         return null;
                     }
                     DataType t = i.GetType(var_name);
@@ -648,8 +634,8 @@ namespace MSIPL
                         i.ThrowError(ErrorGenerator.GenerateDataType("Parser.ParseConsole case pop", line_num, t, var_name), Logger.MessageType.CompilationError);
                         return null;
                     }
-                    if (ch) t = DataType.Char;
-                    return new Console(i, Console.InstructionType.pop, new object[2] { i.GetPointer(var_name), t });
+                    if (ch) t = DataType.Str;
+                    return new Console(i, Console.InstructionType.pop, new Argument[2] { Argument.Variable(i.GetPointer(var_name)), Argument.DataType(t) });
 
                 case Console.InstructionType.push:
                     if (!f.HasArgs)
@@ -663,10 +649,10 @@ namespace MSIPL
                         return null;
                     }
 
-                    var args = new object[f.ArgsCount];
+                    var args = new Argument[f.ArgsCount];
                     for (int k = 0; k < f.Args.Length; k++)
                     {
-                        object arg = f.Args[k].GetConsoleArg(i);
+                        Argument arg = f.Args[k].GetArgument(i);
                         if (arg == null)
                         {
                             i.ThrowError($"Push argument {f.Args[k]} is invalid at MSIPL.Parser.ParseConsole case push, line number is {line_num}", Logger.MessageType.CompilationError);
@@ -682,8 +668,8 @@ namespace MSIPL
                         i.ThrowError($"Instrucion console clear() doesn't require parameters at MSIPL.Parser.ParseConsole, line number is {line_num}", Logger.MessageType.CompilationError);
                         return null;
                     }
-                    if (f.Name == "clear_in") return new Console(i, Console.InstructionType.clear, new object[1] { "in" });
-                    else if (f.Name == "clear_out") return new Console(i, Console.InstructionType.clear, new object[1] { "out" });
+                    if (f.Name == "clear_in") return new Console(i, Console.InstructionType.clear, new Argument[1] { Argument.String("in") });
+                    else if (f.Name == "clear_out") return new Console(i, Console.InstructionType.clear, new Argument[1] { Argument.String("out") });
                     else return null;
 
                 case Console.InstructionType.can_pop:
@@ -703,7 +689,7 @@ namespace MSIPL
                     if (ch) var_name = var_name.RemoveEdges();
                     if (!i.Variables.Exists(var_name))
                     {
-                        i.ThrowError(ErrorGenerator.GenerateVariableDoesntExist("Parser.ParseConsole case can_pop", line_num, var_name), Logger.MessageType.CompilationError);
+                        i.ThrowError(ErrorGenerator.GenerateVariableExistance("Parser.ParseConsole case can_pop", line_num, var_name, false), Logger.MessageType.CompilationError);
                         return null;
                     }
                     if (i.GetPointer(f.ReturnVar).IsReadonly)
@@ -717,13 +703,13 @@ namespace MSIPL
                         i.ThrowError(ErrorGenerator.GenerateDataType("Parser.ParseConsole case can_pop", line_num, t, var_name), Logger.MessageType.CompilationError);
                         return null;
                     }
-                    if (ch) t = DataType.Char;
+                    if (ch) t = DataType.Str;
                     if (i.GetType(f.ReturnVar) != DataType.Bool)
                     {
                         i.ThrowError($"Invalid variable {f.ReturnVar} for return value at MSIPL.Parser.ParseConsole case can_, line number is {line_num}", Logger.MessageType.CompilationError);
                         return null;
                     }
-                    return new Console(i, type, new object[2] { t, i.GetPointer(f.ReturnVar) });
+                    return new Console(i, type, new Argument[2] { Argument.DataType(t), Argument.Variable(i.GetPointer(f.ReturnVar)) });
 
                 default:
                     i.ThrowError(ErrorGenerator.GenerateFunctionName("Parser.ParseConsole", line_num, "console", f.Name), Logger.MessageType.CompilationError);
@@ -731,111 +717,96 @@ namespace MSIPL
             }
         }
 
-        private static Memory ParseMemory(RawFunction f, Processor i, uint line_num)
+        private static Comp ParseComp(RawFunction f, Processor i, uint line_num)
         {
+            string func_name = f.Name;
+            if (func_name == "create")
+            {
+                if (f.ArgsCount != 2)
+                {
+                    i.ThrowError(ErrorGenerator.GenerateArgumentCount("Parser.ParseComp", line_num, func_name, 2, f.ArgsCount), Logger.MessageType.CompilationError);
+                    return null;
+                }
+                Argument arg1 = f.Args[0].GetArgument(i);
+                if (arg1.Type != ArgumentType.@string)
+                {
+                    i.ThrowError(ErrorGenerator.GenerateArgumentType("Parser.ParseComp", line_num, func_name, 0, ArgumentType.@string, arg1.Type), Logger.MessageType.CompilationError);
+                    return null;
+                }
+                if (i.Variables.Exists(arg1.GetValue() as string))
+                {
+                    i.ThrowError(ErrorGenerator.GenerateVariableExistance("Parser.ParseComp", line_num, func_name, true), Logger.MessageType.CompilationError);
+                    return null;
+                }
+                Argument arg2 = f.Args[1].GetArgument(i);
+                if (arg2.Type != ArgumentType.@string)
+                {
+                    i.ThrowError(ErrorGenerator.GenerateArgumentType("Parser.ParseComp", line_num, func_name, 1, ArgumentType.@string, arg2.Type), Logger.MessageType.CompilationError);
+                    return null;
+                }
+                if (string.IsNullOrEmpty(arg2.GetValue() as string) || !GameData.NameToComponent.ContainsKey(arg2.GetValue() as string))
+                {
+                    i.ThrowError($"Component {arg2.GetValue()} doesn't exist at MSIPL.Parser.ParseComp, line number is {line_num}", Logger.MessageType.CompilationError);
+                    return null;
+                }
+                i.Variables.TryAdd(Variable.Component(arg1.GetValue() as string, Component.Create(GameData.NameToComponent[arg2.GetValue() as string])));
+                return Comp.Idle;
+            }
             if (f.Name.Where(ch => ch == '.').Count() != 1)
             {
-                i.ThrowError($"Invalid dot symbol count at MSIPL.Parser.ParseMemory, line numner is {line_num}");
+                i.ThrowError($"Invalid dot symbol count at MSIPL.Parser.ParseComp, line numner is {line_num}", Logger.MessageType.CompilationError);
                 return null;
             }
-            string mem_name = f.Name.Split('.')[0];
-            if (!i.Variables.Exists(mem_name) || i.GetType(mem_name) != DataType.Part)
+            string partName = func_name.BeforeSeparator('.');
+            if (!i.Variables.Exists(partName))
             {
-                i.ThrowError(ErrorGenerator.GeneratePart("Parser.ParseMemory", line_num, mem_name), Logger.MessageType.CompilationError);
+                i.ThrowError(ErrorGenerator.GenerateVariableExistance("Parser.ParseComp", line_num, func_name, false), Logger.MessageType.CompilationError);
                 return null;
             }
-            var mem = i.GetValue(mem_name) as LogicPart;
-            Memory.InstructionType type = f.Name.Split('.')[1].GetMIType();
-            switch (type)
+            Variable part = i.GetPointer(partName);
+            Variable ret = null;
+            if (f.HasReturnVar)
             {
-                case Memory.InstructionType.get:
-                case Memory.InstructionType.get_type:
-                    if (f.ArgsCount != 1)
-                    {
-                        i.ThrowError(ErrorGenerator.GenerateArgumentCount($"Parser.ParseMemory case {type}", line_num, $"memory {type}", 1, f.ArgsCount), Logger.MessageType.CompilationError);
-                        return null;
-                    }
-                    if (!f.HasReturnVar)
-                    {
-                        i.ThrowError(ErrorGenerator.GenerateReturnVariable($"Parser.ParseMemory case {type}", line_num, $"memory {type}", true), Logger.MessageType.CompilationError);
-                        return null;
-                    }
-
-                    string var_name = f.ReturnVar;
-                    if (!i.Variables.Exists(var_name))
-                    {
-                        i.ThrowError(ErrorGenerator.GenerateVariableDoesntExist($"Parser.ParseMemory case {type}", line_num, var_name), Logger.MessageType.CompilationError);
-                        return null;
-                    }
-                    if (i.GetPointer(f.ReturnVar).IsReadonly)
-                    {
-                        i.ThrowError(ErrorGenerator.GenerateReadonly($"Parser.ParseMemory case {type}", line_num, f.ReturnVar), Logger.MessageType.CompilationError);
-                        return null;
-                    }
-                    DataType t = i.GetType(var_name);
-                    if (type == Memory.InstructionType.get_type && t != DataType.Int)
-                    {
-                        i.ThrowError(ErrorGenerator.GenerateDataType($"Parser.ParseMemory case {type}", line_num, t, var_name), Logger.MessageType.CompilationError);
-                        return null;
-                    }
-                    var adr = new Expression(f.Args[0]);
-                    if (adr.HasErrors() || adr.HasUnknownParameters(i.Variables))
-                    {
-                        i.ThrowError(ErrorGenerator.GenerateExpression($"Parser.ParseMemory case {type}", line_num, f.Args[0]), Logger.MessageType.CompilationError);
-                        return null;
-                    }
-                    return new Memory(i, type, mem, adr, i.GetPointer(var_name));
-
-                case Memory.InstructionType.set:
-                    if (f.ArgsCount != 2)
-                    {
-                        i.ThrowError(ErrorGenerator.GenerateArgumentCount("Parser.ParseMemory case set", line_num, "memory set", 2, f.ArgsCount), Logger.MessageType.CompilationError);
-                        return null;
-                    }
-                    if (f.HasReturnVar)
-                    {
-                        i.ThrowError(ErrorGenerator.GenerateReturnVariable("Parser.ParseMemory case set", line_num, "memory set", false), Logger.MessageType.CompilationError);
-                        return null;
-                    }
-
-                    adr = new Expression(f.Args[0]);
-                    if (adr.HasErrors() || adr.HasUnknownParameters(i.Variables))
-                    {
-                        i.ThrowError(ErrorGenerator.GenerateExpression("Parser.ParseMemory case set", line_num, f.Args[0]), Logger.MessageType.CompilationError);
-                        return null;
-                    }
-                    var exp = new Expression(f.Args[1]);
-                    if (exp.HasErrors() || exp.HasUnknownParameters(i.Variables))
-                    {
-                        i.ThrowError(ErrorGenerator.GenerateExpression("Parser.ParseMemory case set", line_num, f.Args[1]), Logger.MessageType.CompilationError);
-                        return null;
-                    }
-                    return new Memory(i, Memory.InstructionType.set, mem, adr, exp);
-
-                case Memory.InstructionType.clear:
-                    if (f.ArgsCount != 1)
-                    {
-                        i.ThrowError(ErrorGenerator.GenerateArgumentCount("Parser.ParseMemory case clear", line_num, "memory clear", 2, f.ArgsCount), Logger.MessageType.CompilationError);
-                        return null;
-                    }
-                    if (f.HasReturnVar)
-                    {
-                        i.ThrowError(ErrorGenerator.GenerateReturnVariable("Parser.ParseMemory case clear", line_num, "memory clear", false), Logger.MessageType.CompilationError);
-                        return null;
-                    }
-
-                    adr = new Expression(f.Args[0]);
-                    if (adr.HasErrors() || adr.HasUnknownParameters(i.Variables))
-                    {
-                        i.ThrowError(ErrorGenerator.GenerateExpression("Parser.ParseMemory case clear", line_num, f.Args[0]), Logger.MessageType.CompilationError);
-                        return null;
-                    }
-                    return new Memory(i, Memory.InstructionType.clear, mem, adr, null);
-
-                default:
-                    i.ThrowError(ErrorGenerator.GenerateFunctionName("Parser.ParseMemory", line_num, "memory", f.Name), Logger.MessageType.CompilationError);
+                if (!i.Variables.Exists(f.ReturnVar))
+                {
+                    i.ThrowError(ErrorGenerator.GenerateVariableExistance("Parser.ParseComp", line_num, f.ReturnVar, false), Logger.MessageType.CompilationError);
                     return null;
+                }
+                ret = i.GetPointer(f.ReturnVar);
+                if (ret.IsReadonly)
+                {
+                    i.ThrowError(ErrorGenerator.GenerateReadonly("Parser.ParseComp", line_num, f.ReturnVar), Logger.MessageType.CompilationError);
+                    return null;
+                }
             }
+            var args = new Argument[f.ArgsCount];
+			func_name = func_name.AfterSeparator('.');
+            for (int j = 0; j < f.ArgsCount; j++)
+                args[j] = f.Args[j].GetArgument(i);
+            if (part.Type == DataType.Part)
+			{
+				if (!GameData.TypeToPartMethods[typeof(Part)].ContainsKey(func_name))
+				{
+					i.ThrowError($"Part method {func_name} is not defined at MSIPL.Parser.ParseComp, line number is {line_num}", Logger.MessageType.CompilationError);
+					return null;
+				}
+				PartMethod m = GameData.TypeToPartMethods[typeof(Part)][func_name];
+				return new Comp(part, m, args, ret, i);
+			}
+			if (part.Type == DataType.Component)
+			{
+				Type t = ((Component)part.Get()).Type;
+				if (!GameData.TypeToPartMethods[t].ContainsKey(func_name))
+				{
+					i.ThrowError($"Method {func_name} of component {t.FullName} is not defined at MSIPL.Parser.ParseComp, line number is {line_num}", Logger.MessageType.CompilationError);
+					return null;
+				}
+				PartMethod m = GameData.TypeToPartMethods[t][func_name];
+				return new Comp(part, m, args, ret, i);
+			}
+            i.ThrowError(ErrorGenerator.GenerateDataType("Parser.ParseComp", line_num, part.Type, partName), Logger.MessageType.CompilationError);
+            return null;
         }
-    }
+		#endregion
+	}
 }

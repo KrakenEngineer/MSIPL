@@ -1,5 +1,8 @@
-﻿using MSIPL;
+using MSIPL;
+using System.Collections.Generic;
 
+//Allows to store part in MSIPL variable without direct reference
+//So garbage collector (real, not MSIPL one) can collect it if destroyed
 public class LogicPart : PartComponentBase
 {
     public int Usings { get; private set; }
@@ -10,6 +13,8 @@ public class LogicPart : PartComponentBase
         Usings = 0;
         GarbageCollector.TryAdd(this);
     }
+
+    protected override void GetProperties(out Dictionary<string, PartProperty> prop) { prop = null; }
 
     public bool TryConnect(Processor i, string name)
     {
